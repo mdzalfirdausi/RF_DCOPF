@@ -1,0 +1,15 @@
+# Ignore ML models and results
+models/
+*.joblib
+*.pt
+*.pth
+results/
+*.json
+
+# Ignore datasets
+omega_cbasis/
+*.pkl
+
+# Python cache
+__pycache__/
+*.pyc
