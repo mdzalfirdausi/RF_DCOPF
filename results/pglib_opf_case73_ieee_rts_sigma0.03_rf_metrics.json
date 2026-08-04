@@ -1,0 +1,15 @@
+{
+    "case_name": "pglib_opf_case73_ieee_rts",
+    "sigma_scaling": 0.03,
+    "model_type": "rf",
+    "num_cbasis": 433,
+    "accuracies_raw": [
+        0.255,
+        0.242,
+        0.253,
+        0.267,
+        0.264
+    ],
+    "mean_accuracy_pct": 25.619999999999997,
+    "std_accuracy_pct": 0.8840814442120146
+}
