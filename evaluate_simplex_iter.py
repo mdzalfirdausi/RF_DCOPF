@@ -21,12 +21,15 @@ from helper import (
     create_scenario_multivariate, 
     lpformulator_dc_body_primal, 
     update_injection_constraints,
-    XGBMultiOutputWrapper  # <-- Add this import
+    XGBMultiOutputWrapper,
+    SharedMLP,           # <-- Add this
+    PyTorchMLPWrapper    # <-- Add this
 )
 
 import __main__
 __main__.XGBMultiOutputWrapper = XGBMultiOutputWrapper
-
+__main__.SharedMLP = SharedMLP
+__main__.PyTorchMLPWrapper = PyTorchMLPWrapper
 # =============================================================================
 # 2. Core Functions
 # =============================================================================
