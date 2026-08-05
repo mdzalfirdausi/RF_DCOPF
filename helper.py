@@ -243,3 +243,48 @@ def update_injection_constraints(case, model, omega_bound):
     omega.LB = omega_bound
     omega.UB = omega_bound
     model.update()  # Update the model to reflect these changes
+
+class XGBMultiOutputWrapper:
+    def __init__(self, n_estimators=100, eval_metric='logloss', random_state=None):
+        
+        # Dynamically detect hardware so it still works locally on your laptop
+        import torch
+        compute_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f"   -> [XGBoost] Hardware detected and assigned: {compute_device.upper()}")
+        
+        self.model = MultiOutputClassifier(
+            XGBClassifier(
+                n_estimators=n_estimators, 
+                eval_metric=eval_metric, 
+                random_state=random_state,
+                tree_method='hist',           # REQUIRED for GPU acceleration
+                device=compute_device,        # REQUIRED for GPU acceleration
+                n_jobs=1                      # Prevents CPU thread crashing
+            ),
+            n_jobs=-1                         # <--- THE FIX: Trains targets concurrently
+        )
+        self.encoders = []
+        
+    def fit(self, X, y):
+        # Create a separate LabelEncoder for every column in the target matrix y
+        self.encoders = [LabelEncoder() for _ in range(y.shape[1])]
+        y_encoded = np.zeros_like(y)
+        
+        # Fit encoder and transform data column by column
+        for i in range(y.shape[1]):
+            y_encoded[:, i] = self.encoders[i].fit_transform(y[:, i])
+        
+        # Train XGBoost on the 0-indexed encoded values
+        self.model.fit(X, y_encoded)
+        return self
+        
+    def predict(self, X):
+        # Get raw predictions (which will be 0, 1, 2, etc.)
+        y_pred_encoded = self.model.predict(X)
+        y_pred = np.zeros_like(y_pred_encoded)
+        
+        # Decode predictions back to original values (-1, 0, etc.)
+        for i in range(y_pred_encoded.shape[1]):
+            y_pred[:, i] = self.encoders[i].inverse_transform(y_pred_encoded[:, i])
+            
+        return y_pred
