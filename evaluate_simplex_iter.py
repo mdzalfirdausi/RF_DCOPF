@@ -212,7 +212,7 @@ if __name__ == "__main__":
     parser.add_argument("--models_dir", type=str, default="./models", help="Directory containing .joblib models")
     parser.add_argument("--data_dir", type=str, default="./omega_cbasis", help="Directory containing target pickle data")
     parser.add_argument("--results_dir", type=str, default="./results", help="Directory to save evaluation summaries")
-    parser.add_argument("--N", type=int, default=5000, help="Number of scenarios to simulate")
+    parser.add_argument("--N", type=int, default=1000, help="Number of scenarios to simulate")
     
     args = parser.parse_args()
     
