@@ -12,4 +12,4 @@ omega_cbasis/
 
 # Python cache
 __pycache__/
-*.pyc
+*.pyc__pycache__/
