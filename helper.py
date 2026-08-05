@@ -134,6 +134,15 @@ def makePTDF(baseMVA, bus, branch, slack=None):
 
     return H                
 
+def create_scenario_multivariate(case, model, N, sigma_scaling = 0.03):
+    buses = case.bus.values
+    buses_cols = {col:num for num,col in enumerate(case.bus.columns.values)}
+    base_demand = buses[:,buses_cols['PD']] / case.baseMVA
+    sigma = (sigma_scaling * base_demand)
+    mean = np.zeros(len(base_demand))
+    covariance_matrix = np.diag(sigma**2)
+    omega = np.random.multivariate_normal(mean, covariance_matrix, N)
+    return omega
 
 def helper(case):
     bus_to_idx = {bus: i+1 for i, bus in enumerate(case.bus.BUS_I.values)}
@@ -161,10 +170,76 @@ def helper(case):
         case.H[int(bus)-1][gen] = 1
     fmax = case.branch.RATE_A.values/case.baseMVA
     d0 = case.bus.PD.values/case.baseMVA
-    c2 = case.gencost.COST_2.values * case.baseMVA**2
-    c1 = case.gencost.COST_1.values * case.baseMVA
-    c0 = case.gencost.COST_0.values
+    c2 = case.gencost.C2.values * case.baseMVA**2
+    c1 = case.gencost.C1.values * case.baseMVA
+    c0 = case.gencost.C0.values
     c = c2 + c1 + c0
     c = np.hstack([c,np.zeros(ngen*2+nbranch*2)])
 
     return c, d0, fmax, nbranch, ngen, nbus, pmin, pmax
+
+def lpformulator_dc_body_primal(case, model):
+    _add_dc_gen_bus_variables(case, model)				
+    set_gencost_objective_primal(case, model)			# (1a✓) 
+    _add_dc_bus_balance_constraints(case, model)		# (1b✓)
+    _add_generator_limit_constraints(case, model)       # (1c✓)
+    _add_branch_limit_constraints(case, model)          # (1d✓)
+
+def _add_dc_gen_bus_variables(case, model):  #(1b)
+    gens = case.gen.values
+    branches = case.branch.values
+    buses = case.bus.values
+    p = model.addMVar(shape=len(gens),lb=-GRB.INFINITY, ub=GRB.INFINITY , name='p')
+    omega = model.addMVar(shape=len(buses), lb=-GRB.INFINITY, ub=GRB.INFINITY, name='omega')
+    case.p = p
+    case.omega = omega
+
+def _add_dc_bus_balance_constraints(case, model): # (1b)
+    p = case.p
+    omega = case.omega
+    buses = case.bus.values
+    buses_cols = {col:num for num,col in enumerate(case.bus.columns.values)}
+    Pd = buses[:,buses_cols['PD']]/case.baseMVA
+    pmin = case.gen.PMIN.values / case.baseMVA
+    model.addConstr(p.sum() == Pd.sum()  + omega.sum(), name="(4b)")
+
+def _add_generator_limit_constraints(case, model):
+    gens = case.gen.values
+    p = case.p
+    gens_cols = {col:num for num,col in enumerate(case.gen.columns.values)}    
+    Pmax = gens[:,gens_cols['PMAX']]/case.baseMVA
+    Pmin = gens[:,gens_cols['PMIN']]/case.baseMVA    
+    status = gens[:,gens_cols['GEN_STATUS']]
+    model.addConstr(p <= Pmax, name="(4c_up)")
+    model.addConstr(p >= Pmin, name="(4c_low)")
+
+def _add_branch_limit_constraints(case, model): #(1d)
+    branches = case.branch.values
+    branches_cols = {col:num for num,col in enumerate(case.branch.columns.values)}
+    buses = case.bus.values
+    buses_cols = {col:num for num,col in enumerate(case.bus.columns.values)}    
+    M, H = case.M, case.H
+    p = case.p
+    omega = case.omega           
+    d = buses[:,buses_cols['PD']]/case.baseMVA
+    limit = branches[:,branches_cols['RATE_A']]/case.baseMVA
+    pmin = case.gen.PMIN.values / case.baseMVA
+    model.addConstr(M@(H@p -d-omega) <= limit, name="(4d)")    
+    model.addConstr(M@(H@p -d-omega) >= -limit,name="(4e)")
+
+def set_gencost_objective_primal(case, model): # (1a)
+    p = case.p
+    pmin = case.gen.PMIN.values / case.baseMVA
+    costvector = case.gencost[['C2', 'C1', 'C0']].values
+    objective_quadratic = (costvector[:, -3]*case.baseMVA**2 ) @ p
+    objective_linear = (costvector[:, -2]*case.baseMVA) @ p
+    objective_constant = costvector[:, -1] @ p
+    model.setObjective(
+        objective_quadratic + objective_constant + objective_linear , sense=GRB.MINIMIZE
+    )    
+
+def update_injection_constraints(case, model, omega_bound):
+    omega = case.omega
+    omega.LB = omega_bound
+    omega.UB = omega_bound
+    model.update()  # Update the model to reflect these changes
