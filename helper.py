@@ -1,3 +1,6 @@
+import os
+import json
+import glob
 import gurobipy as gp
 from gurobipy import GRB
 from matpowercaseframes import CaseFrames
@@ -5,6 +8,8 @@ import joblib
 import numpy as np
 from tqdm import tqdm
 import pathlib, re
+import pickle
+import matplotlib.pyplot as plt
 
 from sys import stderr
 from numpy import zeros, arange, isscalar, dot, ix_, ones, r_, pi, flatnonzero as find
@@ -12,6 +17,22 @@ from scipy.sparse import csr_matrix as sparse
 from pypower.idx_bus import BUS_TYPE, REF, BUS_I
 from pypower.idx_brch import F_BUS, T_BUS, BR_X, TAP, SHIFT, BR_STATUS
 from numpy.linalg import solve
+
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.multioutput import MultiOutputClassifier
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import AdaBoostClassifier
+from xgboost import XGBClassifier
+
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neural_network import MLPClassifier
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 
 def makeBdc(baseMVA, bus, branch):
     """Builds the B matrices and phase shift injections for DC power flow.
@@ -243,3 +264,150 @@ def update_injection_constraints(case, model, omega_bound):
     omega.LB = omega_bound
     omega.UB = omega_bound
     model.update()  # Update the model to reflect these changes
+
+class XGBMultiOutputWrapper:
+    def __init__(self, n_estimators=100, eval_metric='logloss', random_state=None):
+        
+        # Dynamically detect hardware so it still works locally on your laptop
+        import torch
+        compute_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f"   -> [XGBoost] Hardware detected and assigned: {compute_device.upper()}")
+        
+        self.model = MultiOutputClassifier(
+            XGBClassifier(
+                n_estimators=n_estimators, 
+                eval_metric=eval_metric, 
+                random_state=random_state,
+                tree_method='hist',           # REQUIRED for GPU acceleration
+                device=compute_device,        # REQUIRED for GPU acceleration
+                n_jobs=1                      # Prevents CPU thread crashing
+            ),
+            n_jobs=-1                         # <--- THE FIX: Trains targets concurrently
+        )
+        self.encoders = []
+        
+    def fit(self, X, y):
+        # Create a separate LabelEncoder for every column in the target matrix y
+        self.encoders = [LabelEncoder() for _ in range(y.shape[1])]
+        y_encoded = np.zeros_like(y)
+        
+        # Fit encoder and transform data column by column
+        for i in range(y.shape[1]):
+            y_encoded[:, i] = self.encoders[i].fit_transform(y[:, i])
+        
+        # Train XGBoost on the 0-indexed encoded values
+        self.model.fit(X, y_encoded)
+        return self
+        
+    def predict(self, X):
+        # Get raw predictions (which will be 0, 1, 2, etc.)
+        y_pred_encoded = self.model.predict(X)
+        y_pred = np.zeros_like(y_pred_encoded)
+        
+        # Decode predictions back to original values (-1, 0, etc.)
+        for i in range(y_pred_encoded.shape[1]):
+            y_pred[:, i] = self.encoders[i].inverse_transform(y_pred_encoded[:, i])
+            
+        return y_pred
+
+# 1. Define the architecture globally so joblib can pickle it
+class SharedMLP(nn.Module):
+    def __init__(self, in_dim, targets, classes, h1, h2):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, h1),
+            nn.ReLU(),
+            nn.Linear(h1, h2),
+            nn.ReLU(),
+            # Output size is (targets * classes) to predict everything at once
+            nn.Linear(h2, targets * classes)
+        )
+        self.targets = targets
+        self.classes = classes
+
+    def forward(self, x):
+        out = self.net(x)
+        # Reshape to (batch_size, num_classes, num_targets) for PyTorch CrossEntropyLoss
+        return out.view(-1, self.classes, self.targets)
+
+
+# 2. The wrapper now calls the global SharedMLP class
+class PyTorchMLPWrapper:
+    """
+    A PyTorch shared-representation Multi-Layer Perceptron that acts like a scikit-learn model.
+    It predicts all basis statuses simultaneously to capture physical constraints.
+    """
+    def __init__(self, hidden_sizes=(100, 50), max_iter=500, batch_size=64, lr=0.001, random_state=None):
+        self.hidden_sizes = hidden_sizes
+        self.max_iter = max_iter
+        self.batch_size = batch_size
+        self.lr = lr
+        self.random_state = random_state
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {self.device}")
+        self.encoders = []
+        self.model = None
+        self.num_classes = 0
+
+    def fit(self, X, y):
+        if self.random_state is not None:
+            torch.manual_seed(self.random_state)
+            
+        # Encode targets just like the XGBWrapper
+        self.encoders = [LabelEncoder() for _ in range(y.shape[1])]
+        y_encoded = np.zeros_like(y)
+        for i in range(y.shape[1]):
+            y_encoded[:, i] = self.encoders[i].fit_transform(y[:, i])
+            
+        # Find the maximum number of unique classes across all target columns
+        self.num_classes = int(np.max(y_encoded)) + 1
+        num_features = X.shape[1]
+        num_targets = y.shape[1]
+        
+        # Initialize the global model and move to CPU/GPU
+        self.model = SharedMLP(num_features, num_targets, self.num_classes, 
+                               self.hidden_sizes[0], self.hidden_sizes[1]).to(self.device)
+        
+        # Prepare PyTorch DataLoaders
+        X_tensor = torch.tensor(X, dtype=torch.float32)
+        y_tensor = torch.tensor(y_encoded, dtype=torch.long)
+        dataset = TensorDataset(X_tensor, y_tensor)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+        
+        # Training Loop
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
+        
+        self.model.train()
+        for epoch in range(self.max_iter):
+            for batch_X, batch_y in dataloader:
+                batch_X, batch_y = batch_X.to(self.device), batch_y.to(self.device)
+                
+                optimizer.zero_grad()
+                outputs = self.model(batch_X)
+                loss = criterion(outputs, batch_y)
+                loss.backward()
+                optimizer.step()
+
+        # Move model back to CPU at the end to ensure it saves safely via joblib
+        self.model.to('cpu')
+        return self
+        
+    def predict(self, X):
+        self.model.to(self.device)
+        self.model.eval()
+        
+        X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
+        
+        with torch.no_grad():
+            outputs = self.model(X_tensor)
+            # Get the class with the highest probability for each target
+            predictions = torch.argmax(outputs, dim=1).cpu().numpy()
+            
+        # Decode back to original basis statuses (-1, 0, etc.)
+        y_pred = np.zeros_like(predictions)
+        for i in range(predictions.shape[1]):
+            y_pred[:, i] = self.encoders[i].inverse_transform(predictions[:, i])
+            
+        self.model.to('cpu')
+        return y_pred
