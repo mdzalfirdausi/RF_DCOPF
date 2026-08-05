@@ -20,8 +20,12 @@ from helper import (
     helper, 
     create_scenario_multivariate, 
     lpformulator_dc_body_primal, 
-    update_injection_constraints
+    update_injection_constraints,
+    XGBMultiOutputWrapper  # <-- Add this import
 )
+
+import __main__
+__main__.XGBMultiOutputWrapper = XGBMultiOutputWrapper
 
 # =============================================================================
 # 2. Core Functions
