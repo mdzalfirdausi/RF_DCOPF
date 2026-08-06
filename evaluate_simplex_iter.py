@@ -80,12 +80,15 @@ def iter_warmstart(case, omega_valid, y_val, num_cbasis):
 # 3. Automated Batch Evaluation Engine
 # =============================================================================
 
-def run_batch_evaluation(target_case, models_dir='./models', data_dir='./omega_cbasis', results_dir='./results', N=5000):
+def run_batch_evaluation(target_case, target_model='all', models_dir='./models', data_dir='./omega_cbasis', results_dir='./results', N=1000):
     os.makedirs(results_dir, exist_ok=True)
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Hardware context initialized: {device.upper()}")
-    print(f"Targeting network case: {target_case}\n")
+    print(f"Targeting network case: {target_case}")
+    if target_model.lower() != 'all':
+        print(f"Targeting specific model: {target_model.upper()}")
+    print("")
 
     # ---------------------------------------------------------
     # Initialize Case Framework ONCE using your helper.py
@@ -108,7 +111,7 @@ def run_batch_evaluation(target_case, models_dir='./models', data_dir='./omega_c
     print(" [+] Network initialization complete.\n")
 
     # ---------------------------------------------------------
-    # Scan models and evaluate only those matching target_case
+    # Scan models and evaluate matching targets
     # ---------------------------------------------------------
     model_files = glob.glob(os.path.join(models_dir, '*.joblib'))
     if not model_files:
@@ -127,13 +130,17 @@ def run_batch_evaluation(target_case, models_dir='./models', data_dir='./omega_c
             
         case_name = match.group('case_name')
         
-        # Skip if this model file doesn't match the command-line flag
+        # Skip if this model file doesn't match the command-line case flag
         if case_name != target_case:
             continue
             
         sigma_scaling = float(match.group('sigma'))
         model_type = match.group('model_type')
         seed = int(match.group('seed'))
+        
+        # Skip if a specific model was requested and this doesn't match
+        if target_model.lower() != 'all' and model_type.lower() != target_model.lower():
+            continue
         
         print(f"\n{'='*70}")
         print(f"Evaluating: {filename}")
@@ -163,16 +170,22 @@ def run_batch_evaluation(target_case, models_dir='./models', data_dir='./omega_c
             print(" [*] Injecting predictions to Gurobi...")
             iter_valid = iter_warmstart(case, omega_valid, y_val, num_cbasis)
             
-            ml_avg_iter = np.average(list(iter_valid.values()))
+            # --- EXTRACT ALL METRICS ---
+            all_iterations = list(iter_valid.values())
+            ml_avg_iter = np.average(all_iterations)
+            ml_max_iter = np.max(all_iterations)
             
-            print(f"\n -> {model_type.upper()} Warm-Start Avg Iterations:  {ml_avg_iter:.2f}")
+            print(f"\n -> {model_type.upper()} Warm-Start AVG Iterations:  {ml_avg_iter:.2f}")
+            print(f" -> {model_type.upper()} Warm-Start MAX Iterations:  {ml_max_iter}")
             
             evaluation_results.append({
                 'case_name': case_name,
                 'sigma_scaling': sigma_scaling,
                 'model_type': model_type,
                 'seed': seed,
-                'ml_avg_iter': ml_avg_iter
+                'ml_avg_iter': ml_avg_iter,
+                'ml_max_iter': ml_max_iter,
+                'raw_iterations_list': all_iterations # Records every single scenario
             })
 
         except Exception as e:
@@ -188,20 +201,26 @@ def run_batch_evaluation(target_case, models_dir='./models', data_dir='./omega_c
     # ---------------------------------------------------------
     if evaluation_results:
         results_df = pd.DataFrame(evaluation_results)
-        csv_out = os.path.join(results_dir, f"{target_case}_model_evaluation_summary.csv")
-        results_df.to_csv(csv_out, index=False)
-        print(f"\nBatch evaluation complete for {target_case}. Summary saved to {csv_out}")
         
-        print("\n--- Quick Pivot Summary (Average Iterations) ---")
+        # Append the model flag to the output filename if a specific model was chosen
+        if target_model.lower() == 'all':
+            csv_out = os.path.join(results_dir, f"{target_case}_model_evaluation_summary.csv")
+        else:
+            csv_out = os.path.join(results_dir, f"{target_case}_{target_model.lower()}_evaluation_summary.csv")
+            
+        results_df.to_csv(csv_out, index=False)
+        print(f"\nBatch evaluation complete. Summary saved to {csv_out}")
+        
+        print("\n--- Quick Pivot Summary (MAX Iterations) ---")
         summary_pivot = results_df.pivot_table(
             index=['case_name', 'sigma_scaling'], 
             columns='model_type', 
-            values='ml_avg_iter', 
-            aggfunc='mean'
+            values='ml_max_iter', 
+            aggfunc='max'
         ).round(2)
         print(summary_pivot)
     else:
-        print(f"\nNo valid models were successfully evaluated for {target_case}.")
+        print(f"\nNo valid models were successfully evaluated.")
 
 # =============================================================================
 # Execute Engine
@@ -209,6 +228,7 @@ def run_batch_evaluation(target_case, models_dir='./models', data_dir='./omega_c
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate ML Models for DCOPF Simplex Warm-Starts")
     parser.add_argument("--case", type=str, required=True, help="Name of the PGLib-OPF case (e.g., pglib_opf_case73_ieee_rts)")
+    parser.add_argument("--model", type=str, default="all", help="Specific model type to evaluate (e.g., rf, xgb, mlp). Default is 'all'.")
     parser.add_argument("--models_dir", type=str, default="./models", help="Directory containing .joblib models")
     parser.add_argument("--data_dir", type=str, default="./omega_cbasis", help="Directory containing target pickle data")
     parser.add_argument("--results_dir", type=str, default="./results", help="Directory to save evaluation summaries")
@@ -218,6 +238,7 @@ if __name__ == "__main__":
     
     run_batch_evaluation(
         target_case=args.case, 
+        target_model=args.model,
         models_dir=args.models_dir, 
         data_dir=args.data_dir, 
         results_dir=args.results_dir, 
