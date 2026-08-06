@@ -80,7 +80,7 @@ def iter_warmstart(case, omega_valid, y_val, num_cbasis):
 # 3. Automated Batch Evaluation Engine
 # =============================================================================
 
-def run_batch_evaluation(target_case, target_model='all', models_dir='./models', data_dir='./omega_cbasis', results_dir='./results', N=1000):
+def run_batch_evaluation(target_case, target_model='all', target_sigma='all', models_dir='./models', data_dir='./omega_cbasis', results_dir='./results', N=1000):
     os.makedirs(results_dir, exist_ok=True)
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -88,6 +88,8 @@ def run_batch_evaluation(target_case, target_model='all', models_dir='./models',
     print(f"Targeting network case: {target_case}")
     if target_model.lower() != 'all':
         print(f"Targeting specific model: {target_model.upper()}")
+    if target_sigma.lower() != 'all':
+        print(f"Targeting specific sigma: {target_sigma}")
     print("")
 
     # ---------------------------------------------------------
@@ -141,6 +143,11 @@ def run_batch_evaluation(target_case, target_model='all', models_dir='./models',
         # Skip if a specific model was requested and this doesn't match
         if target_model.lower() != 'all' and model_type.lower() != target_model.lower():
             continue
+            
+        # Skip if a specific sigma was requested and this doesn't match
+        if target_sigma.lower() != 'all':
+            if not np.isclose(sigma_scaling, float(target_sigma)):
+                continue
         
         print(f"\n{'='*70}")
         print(f"Evaluating: {filename}")
@@ -202,12 +209,15 @@ def run_batch_evaluation(target_case, target_model='all', models_dir='./models',
     if evaluation_results:
         results_df = pd.DataFrame(evaluation_results)
         
-        # Append the model flag to the output filename if a specific model was chosen
-        if target_model.lower() == 'all':
-            csv_out = os.path.join(results_dir, f"{target_case}_model_evaluation_summary.csv")
-        else:
-            csv_out = os.path.join(results_dir, f"{target_case}_{target_model.lower()}_evaluation_summary.csv")
-            
+        # Build dynamic filename based on flags
+        csv_filename = f"{target_case}"
+        if target_model.lower() != 'all':
+            csv_filename += f"_{target_model.lower()}"
+        if target_sigma.lower() != 'all':
+            csv_filename += f"_sigma{target_sigma}"
+        csv_filename += "_evaluation_summary.csv"
+        
+        csv_out = os.path.join(results_dir, csv_filename)
         results_df.to_csv(csv_out, index=False)
         print(f"\nBatch evaluation complete. Summary saved to {csv_out}")
         
@@ -229,6 +239,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate ML Models for DCOPF Simplex Warm-Starts")
     parser.add_argument("--case", type=str, required=True, help="Name of the PGLib-OPF case (e.g., pglib_opf_case73_ieee_rts)")
     parser.add_argument("--model", type=str, default="all", help="Specific model type to evaluate (e.g., rf, xgb, mlp). Default is 'all'.")
+    parser.add_argument("--sigma", type=str, default="all", help="Specific sigma scaling factor to evaluate (e.g., 0.01, 0.03). Default is 'all'.")
     parser.add_argument("--models_dir", type=str, default="./models", help="Directory containing .joblib models")
     parser.add_argument("--data_dir", type=str, default="./omega_cbasis", help="Directory containing target pickle data")
     parser.add_argument("--results_dir", type=str, default="./results", help="Directory to save evaluation summaries")
@@ -239,6 +250,7 @@ if __name__ == "__main__":
     run_batch_evaluation(
         target_case=args.case, 
         target_model=args.model,
+        target_sigma=args.sigma,
         models_dir=args.models_dir, 
         data_dir=args.data_dir, 
         results_dir=args.results_dir, 
